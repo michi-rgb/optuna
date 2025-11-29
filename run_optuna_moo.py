@@ -10,6 +10,8 @@ import argparse
 import optuna
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel as C
 
 
 def objective(trial: optuna.trial.Trial):
@@ -151,10 +153,87 @@ def plot_pareto(study: optuna.study.Study, output: str = "pareto.png"):
     print(f"Saved comprehensive analysis figure to: {output}")
 
 
+def plot_gpr_uncertainty(study: optuna.study.Study, output: str = "sensitivity.png", grid_size: int = 80):
+    """Fit Gaussian Process for each objective and plot predictive std over input space.
+
+    Produces a side-by-side figure with predictive standard deviation (uncertainty)
+    for objective1 and objective2 on a 2D grid of (x, y).
+    """
+    trials = [t for t in study.trials if t.values is not None]
+    if len(trials) < 5:
+        print("Not enough trials to fit GPRs (need at least 5). Skipping GPR uncertainty plot.")
+        return
+
+    X = np.array([[t.params["x"], t.params["y"]] for t in trials])
+    y1 = np.array([t.values[0] for t in trials])
+    y2 = np.array([t.values[1] for t in trials])
+
+    # grid bounds with small margin
+    margin_x = 0.1 * (X[:, 0].max() - X[:, 0].min() if np.ptp(X[:, 0]) > 0 else 1.0)
+    margin_y = 0.1 * (X[:, 1].max() - X[:, 1].min() if np.ptp(X[:, 1]) > 0 else 1.0)
+    x_min, x_max = X[:, 0].min() - margin_x, X[:, 0].max() + margin_x
+    y_min, y_max = X[:, 1].min() - margin_y, X[:, 1].max() + margin_y
+
+    xx = np.linspace(x_min, x_max, grid_size)
+    yy = np.linspace(y_min, y_max, grid_size)
+    XX, YY = np.meshgrid(xx, yy)
+    Xgrid = np.column_stack([XX.ravel(), YY.ravel()])
+
+    # kernel: constant * RBF + white noise
+    kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-10, 1e1))
+
+    gpr1 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
+    gpr2 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
+
+    gpr1.fit(X, y1)
+    gpr2.fit(X, y2)
+
+    mu1, std1 = gpr1.predict(Xgrid, return_std=True)
+    mu2, std2 = gpr2.predict(Xgrid, return_std=True)
+
+    S1 = std1.reshape(XX.shape)
+    S2 = std2.reshape(XX.shape)
+
+    # Pareto indices to highlight
+    objs = [t.values for t in trials]
+    pareto_idx = non_dominated_indices(objs)
+    pareto_xy = np.array([[trials[i].params["x"], trials[i].params["y"]] for i in pareto_idx]) if pareto_idx else np.empty((0, 2))
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    im0 = axes[0].contourf(XX, YY, S1, levels=40, cmap="viridis")
+    axes[0].scatter(X[:, 0], X[:, 1], c="white", s=20, edgecolor="black", label="Samples")
+    if pareto_xy.size:
+        axes[0].scatter(pareto_xy[:, 0], pareto_xy[:, 1], c="red", s=80, marker="*", label="Pareto")
+    axes[0].set_title("Predictive std (Objective 1)")
+    axes[0].set_xlabel("x")
+    axes[0].set_ylabel("y")
+    fig.colorbar(im0, ax=axes[0], label="std")
+
+    im1 = axes[1].contourf(XX, YY, S2, levels=40, cmap="viridis")
+    axes[1].scatter(X[:, 0], X[:, 1], c="white", s=20, edgecolor="black", label="Samples")
+    if pareto_xy.size:
+        axes[1].scatter(pareto_xy[:, 0], pareto_xy[:, 1], c="red", s=80, marker="*", label="Pareto")
+    axes[1].set_title("Predictive std (Objective 2)")
+    axes[1].set_xlabel("x")
+    axes[1].set_ylabel("y")
+    fig.colorbar(im1, ax=axes[1], label="std")
+
+    for ax in axes:
+        ax.legend(loc="upper right")
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+
+    plt.suptitle("GPR Predictive Uncertainty (std) for Each Objective", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(output, dpi=150, bbox_inches="tight")
+    print(f"Saved GPR predictive std figure to: {output}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Optuna multi-objective example")
     parser.add_argument("--trials", type=int, default=30, help="Number of trials")
     parser.add_argument("--output", type=str, default="pareto.png", help="Output image file for Pareto front")
+    parser.add_argument("--sensitivity-output", type=str, default="sensitivity.png", help="Output image file for GPR predictive std (sensitivity)")
     args = parser.parse_args()
 
     study = optuna.create_study(directions=["minimize", "minimize"])
@@ -173,6 +252,11 @@ def main():
         print(f"  Trial#{t.number}: values={t.values}, params={t.params}")
 
     plot_pareto(study, output=args.output)
+    # Compute and plot predictive uncertainty (std) from GPRs for each objective
+    try:
+        plot_gpr_uncertainty(study, output=args.sensitivity_output)
+    except Exception as e:
+        print("GPR sensitivity plot failed:", e)
 
 
 if __name__ == "__main__":
