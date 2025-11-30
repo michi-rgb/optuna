@@ -447,18 +447,20 @@ def plot_local_sensitivity(study: optuna.study.Study, output: str = "local_sensi
     opt2 = grid[np.argmin(mu2_grid)]  # (x*, y*) for objective 2
 
     # Finite-difference gradients at each predicted optimum
-    eps = 1e-4
+    # Use eps as one quarter of the exploration range per dimension
+    eps_x = (x_max - x_min) / 4.0
+    eps_y = (y_max - y_min) / 4.0
     def finite_diff(gpr, point):
-        px = point.copy(); px[0] += eps
-        mx = point.copy(); mx[0] -= eps
-        py = point.copy(); py[1] += eps
-        my = point.copy(); my[1] -= eps
+        px = point.copy(); px[0] += eps_x
+        mx = point.copy(); mx[0] -= eps_x
+        py = point.copy(); py[1] += eps_y
+        my = point.copy(); my[1] -= eps_y
         f_px = gpr.predict(px.reshape(1, -1))[0]
         f_mx = gpr.predict(mx.reshape(1, -1))[0]
         f_py = gpr.predict(py.reshape(1, -1))[0]
         f_my = gpr.predict(my.reshape(1, -1))[0]
-        dfdx = (f_px - f_mx) / (2 * eps)
-        dfdy = (f_py - f_my) / (2 * eps)
+        dfdx = (f_px - f_mx) / (2 * eps_x)
+        dfdy = (f_py - f_my) / (2 * eps_y)
         return dfdx, dfdy
 
     grad_x_obj1, grad_y_obj1 = finite_diff(gpr1, opt1)
@@ -476,8 +478,6 @@ def plot_local_sensitivity(study: optuna.study.Study, output: str = "local_sensi
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars1, vals1):
         ax.text(bar.get_x() + bar.get_width()/2, val + 0.01*max(vals1), f"{val:.3f}", ha="center", fontsize=9)
-    ax.annotate(f"Opt1=(x={opt1[0]:.2f}, y={opt1[1]:.2f})", xy=(0.5, 0.9), xycoords="axes fraction", ha="center", fontsize=9,
-                bbox=dict(boxstyle="round", facecolor="white", alpha=0.6))
 
     ax = axes[1]
     vals2 = [abs(grad_x_obj2), abs(grad_y_obj2)]
@@ -487,79 +487,10 @@ def plot_local_sensitivity(study: optuna.study.Study, output: str = "local_sensi
     ax.grid(True, alpha=0.3, axis="y")
     for bar, val in zip(bars2, vals2):
         ax.text(bar.get_x() + bar.get_width()/2, val + 0.01*max(vals2), f"{val:.3f}", ha="center", fontsize=9)
-    ax.annotate(f"Opt2=(x={opt2[0]:.2f}, y={opt2[1]:.2f})", xy=(0.5, 0.9), xycoords="axes fraction", ha="center", fontsize=9,
-                bbox=dict(boxstyle="round", facecolor="white", alpha=0.6))
 
     plt.tight_layout()
     plt.savefig(output, dpi=150, bbox_inches="tight")
     print(f"Saved local sensitivity figure to: {output}")
-
-
-def plot_partial_dependence(study: optuna.study.Study, output: str = "partial_dependence.png"):
-    trials = [t for t in study.trials if t.values is not None]
-    if len(trials) < 5:
-        print("Not enough trials for partial dependence. Skipping.")
-        return
-
-    X = np.array([[t.params["x"], t.params["y"]] for t in trials])
-    y1 = np.array([t.values[0] for t in trials])
-    y2 = np.array([t.values[1] for t in trials])
-
-    kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-10, 1e1))
-    gpr1 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
-    gpr2 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
-    gpr1.fit(X, y1)
-    gpr2.fit(X, y2)
-
-    # Calculate mean values for annotation
-    mean_x = X[:, 0].mean()
-    mean_y = X[:, 1].mean()
-
-    grid_x = np.linspace(-5, 5, 100)
-    grid_y = np.linspace(-5, 5, 100)
-
-    pdp_x_obj1 = []
-    pdp_x_obj2 = []
-    for x_val in grid_x:
-        X_slice = np.column_stack([np.full(len(X), x_val), X[:, 1]])
-        mu1_vals = gpr1.predict(X_slice)
-        mu2_vals = gpr2.predict(X_slice)
-        pdp_x_obj1.append(mu1_vals.mean())
-        pdp_x_obj2.append(mu2_vals.mean())
-
-    pdp_y_obj1 = []
-    pdp_y_obj2 = []
-    for y_val in grid_y:
-        X_slice = np.column_stack([X[:, 0], np.full(len(X), y_val)])
-        mu1_vals = gpr1.predict(X_slice)
-        mu2_vals = gpr2.predict(X_slice)
-        pdp_y_obj1.append(mu1_vals.mean())
-        pdp_y_obj2.append(mu2_vals.mean())
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    ax = axes[0]
-    ax.plot(grid_x, pdp_x_obj1, "b-", linewidth=2, label=f"x effect (y averaged over samples)")
-    ax.plot(grid_y, pdp_y_obj1, "orange", linewidth=2, label=f"y effect (x averaged over samples)")
-    ax.scatter(X[:, 0], y1, alpha=0.3, s=20, color="gray", label="Samples")
-    ax.set_xlabel("Input Value")
-    ax.set_ylabel("Obj1 (PDP)")
-    ax.set_title(f"Obj1 Partial Dependence Plot\n(x: y fixed at mean={mean_y:.2f}, y: x fixed at mean={mean_x:.2f})")
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1]
-    ax.plot(grid_x, pdp_x_obj2, "b-", linewidth=2, label=f"x effect (y averaged over samples)")
-    ax.plot(grid_y, pdp_y_obj2, "orange", linewidth=2, label=f"y effect (x averaged over samples)")
-    ax.scatter(X[:, 0], y2, alpha=0.3, s=20, color="gray", label="Samples")
-    ax.set_xlabel("Input Value")
-    ax.set_ylabel("Obj2 (PDP)")
-    ax.set_title(f"Obj2 Partial Dependence Plot\n(x: y fixed at mean={mean_y:.2f}, y: x fixed at mean={mean_x:.2f})")
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(output, dpi=150, bbox_inches="tight")
-    print(f"Saved partial dependence figure to: {output}")
 
 
 def main():
@@ -567,7 +498,6 @@ def main():
     parser.add_argument("--trials", type=int, default=20, help="Number of trials")
     parser.add_argument("--output", type=str, default="pareto.png", help="Output image file for Pareto front")
     parser.add_argument("--slices-output", type=str, default="slices.png", help="Output image file for GPR slice plots with confidence bands")
-    parser.add_argument("--partial-dependence", type=str, default="partial_dependence.png", help="Output image file for partial dependence plot (PDP)")
     parser.add_argument("--surfaces-output", type=str, default="gpr_surfaces.png", help="Output image file for 2D GPR surfaces (mean and variance)")
     parser.add_argument("--partial-correlation", type=str, default="partial_correlation.png", help="Output image file for partial correlation plot")
     parser.add_argument("--local-sensitivity", type=str, default="local_sensitivity.png", help="Output image file for local sensitivity plot")
@@ -582,7 +512,6 @@ def main():
 
     args.output = to_results_path(args.output)
     args.slices_output = to_results_path(args.slices_output)
-    args.partial_dependence = to_results_path(args.partial_dependence)
     args.surfaces_output = to_results_path(args.surfaces_output)
     args.partial_correlation = to_results_path(args.partial_correlation)
     args.local_sensitivity = to_results_path(args.local_sensitivity)
@@ -613,7 +542,6 @@ def main():
     try:
         plot_partial_correlation(study, output=args.partial_correlation)
         plot_local_sensitivity(study, output=args.local_sensitivity)
-        plot_partial_dependence(study, output=args.partial_dependence)
     except Exception as e:
         print("Sensitivity analysis plots failed:", e)
     # Plot 2D GPR surfaces (mean and variance)
