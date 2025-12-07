@@ -12,7 +12,7 @@ import optuna
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel as C
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, Matern, DotProduct, ConstantKernel
 
 
 def objective(trial: optuna.trial.Trial):
@@ -130,29 +130,28 @@ def plot_pareto(study: optuna.study.Study, output: str = "pareto.png"):
     print(f"Saved comprehensive analysis figure to: {output}")
 
 
-def plot_gpr_slices(study: optuna.study.Study, output: str = "slices.png"):
-    """Plot GPR mean predictions and std bands along each input dimension.
+def plot_gpr_slice_single(study: optuna.study.Study, objective_index: int, output: str, objective_name: str):
+    """Plot GPR mean predictions and std bands for a single objective.
     
-    For each input variable, fixes other variables at values that minimize
-    each objective, then plots the predicted mean and ±1σ bands.
+    For each input variable, fixes the other variable at the predicted optimum
+    for this objective, then plots the predicted mean and ±1σ bands.
     """
     trials = [t for t in study.trials if t.values is not None]
     if len(trials) < 5:
-        print("Not enough trials for GPR slice plots. Skipping.")
+        print(f"Not enough trials for GPR slice plots of {objective_name}. Skipping.")
         return
 
     X = np.array([[t.params["x"], t.params["y"]] for t in trials])
-    y1 = np.array([t.values[0] for t in trials])
-    y2 = np.array([t.values[1] for t in trials])
+    y = np.array([t.values[objective_index] for t in trials])
 
-    # Fit GPRs
-    kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-10, 1e1))
-    gpr1 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
-    gpr2 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
-    gpr1.fit(X, y1)
-    gpr2.fit(X, y2)
+    kernel = (
+        ConstantKernel(1.0, (1e-3, 1e3)) * Matern(length_scale=np.ones(X.shape[1]), nu=2.5)
+        + DotProduct(sigma_0=1.0, sigma_0_bounds=(1e-3, 1e3))
+        + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-8, 1e-1))
+    )
+    gpr = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
+    gpr.fit(X, y)
 
-    # Find predicted optima (argmin of GPR mean) for each objective via grid search
     grid_size = 120
     x_min, x_max = -5.0, 5.0
     y_min, y_max = -5.0, 5.0
@@ -160,88 +159,52 @@ def plot_gpr_slices(study: optuna.study.Study, output: str = "slices.png"):
     yy = np.linspace(y_min, y_max, grid_size)
     XX, YY = np.meshgrid(xx, yy)
     grid = np.column_stack([XX.ravel(), YY.ravel()])
-    mu1_grid = gpr1.predict(grid)
-    mu2_grid = gpr2.predict(grid)
-    opt1 = grid[np.argmin(mu1_grid)]  # (x*, y*) for objective 1
-    opt2 = grid[np.argmin(mu2_grid)]  # (x*, y*) for objective 2
-    
-    # Predicted optimal parameter values for each objective
-    best_x_obj1, best_y_obj1 = opt1[0], opt1[1]
-    best_x_obj2, best_y_obj2 = opt2[0], opt2[1]
+    mu_grid = gpr.predict(grid)
+    opt = grid[np.argmin(mu_grid)]
+    best_x, best_y = opt[0], opt[1] # 予測最適値
 
-    # Create slice plots for each input variable
-    fig, axes = plt.subplots(2, 2, figsize=(13, 10))
-    fig.suptitle("GPR Mean Predictions & Uncertainty Bands (±3σ)", fontsize=14, fontweight="bold")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle(f"{objective_name} GPR Mean Predictions & Uncertainty Bands (±3σ)", fontsize=13, fontweight="bold")
 
-    param_names = ["x", "y"]
-    param_bounds = [(-5.0, 5.0), (-5.0, 5.0)]
+    """説明変数 1個目 (x) を変化させ、2個目 (y) を最適値に固定した場合のスライス"""
+    grid_x = np.linspace(x_min, x_max, 200)
+    X_slice_x = np.column_stack([grid_x, np.full_like(grid_x, best_y)]) # 2列目はyの予測最適値(固定値)
+    mu_slice_x, std_slice_x = gpr.predict(X_slice_x, return_std=True)
 
-    # Plot slices along x (fixing y to best values for each objective)
-    grid_x = np.linspace(param_bounds[0][0], param_bounds[0][1], 200)
-    
-    # Objective 1: slice along x, y fixed to best_y_obj1
-    X_slice_obj1 = np.column_stack([grid_x, np.full_like(grid_x, best_y_obj1)])
-    mu1_slice, std1_slice = gpr1.predict(X_slice_obj1, return_std=True)
-    
-    ax = axes[0, 0]
-    ax.plot(grid_x, mu1_slice, "b-", linewidth=2, label="Mean")
-    ax.fill_between(grid_x, mu1_slice - 3*std1_slice, mu1_slice + 3*std1_slice, alpha=0.3, color="blue", label="±3σ")
-    ax.scatter(X[:, 0], y1, alpha=0.5, s=30, color="gray", label="Samples")
-    ax.set_xlabel("x (with y fixed to predicted optimum for Obj1)", fontsize=10)
-    ax.set_ylabel("Objective 1", fontsize=10)
-    ax.set_title(f"Obj1: x vs Output (y={best_y_obj1:.3f})", fontweight="bold")
+    ax = axes[0]
+    ax.plot(grid_x, mu_slice_x, "b-", linewidth=2, label="Mean")
+    ax.fill_between(grid_x, mu_slice_x - 3 * std_slice_x, mu_slice_x + 3 * std_slice_x, alpha=0.3, color="blue", label="±3σ")
+    ax.scatter(X[:, 0], y, alpha=0.5, s=30, color="gray", label="Samples")
+    ax.set_xlabel(f"x (y fixed to predicted optimum: {best_y:.3f})", fontsize=10)
+    ax.set_ylabel(objective_name, fontsize=10)
+    ax.set_title("Slice along x", fontweight="bold")
     ax.legend(loc="best")
     ax.grid(True, alpha=0.3)
 
-    # Objective 2: slice along x, y fixed to best_y_obj2
-    X_slice_obj2_x = np.column_stack([grid_x, np.full_like(grid_x, best_y_obj2)])
-    mu2_slice_x, std2_slice_x = gpr2.predict(X_slice_obj2_x, return_std=True)
-    
-    ax = axes[0, 1]
-    ax.plot(grid_x, mu2_slice_x, "r-", linewidth=2, label="Mean")
-    ax.fill_between(grid_x, mu2_slice_x - 3*std2_slice_x, mu2_slice_x + 3*std2_slice_x, alpha=0.3, color="red", label="±3σ")
-    ax.scatter(X[:, 0], y2, alpha=0.5, s=30, color="gray", label="Samples")
-    ax.set_xlabel("x (with y fixed to predicted optimum for Obj2)", fontsize=10)
-    ax.set_ylabel("Objective 2", fontsize=10)
-    ax.set_title(f"Obj2: x vs Output (y={best_y_obj2:.3f})", fontweight="bold")
-    ax.legend(loc="best")
-    ax.grid(True, alpha=0.3)
+    """説明変数 2個目 (y) を変化させ、1個目 (x) を最適値に固定した場合のスライス"""
+    grid_y = np.linspace(y_min, y_max, 200)
+    X_slice_y = np.column_stack([np.full_like(grid_y, best_x), grid_y]) # 1列目はxの予測最適値(固定値)
+    mu_slice_y, std_slice_y = gpr.predict(X_slice_y, return_std=True)
 
-    # Plot slices along y
-    grid_y = np.linspace(param_bounds[1][0], param_bounds[1][1], 200)
-
-    # Objective 1: slice along y, x fixed to best_x_obj1
-    X_slice_obj1_y = np.column_stack([np.full_like(grid_y, best_x_obj1), grid_y])
-    mu1_slice_y, std1_slice_y = gpr1.predict(X_slice_obj1_y, return_std=True)
-    
-    ax = axes[1, 0]
-    ax.plot(grid_y, mu1_slice_y, "b-", linewidth=2, label="Mean")
-    ax.fill_between(grid_y, mu1_slice_y - 3*std1_slice_y, mu1_slice_y + 3*std1_slice_y, alpha=0.3, color="blue", label="±3σ")
-    ax.scatter(X[:, 1], y1, alpha=0.5, s=30, color="gray", label="Samples")
-    ax.set_xlabel("y (with x fixed to predicted optimum for Obj1)", fontsize=10)
-    ax.set_ylabel("Objective 1", fontsize=10)
-    ax.set_title(f"Obj1: y vs Output (x={best_x_obj1:.3f})", fontweight="bold")
-    ax.legend(loc="best")
-    ax.grid(True, alpha=0.3)
-
-    # Objective 2: slice along y, x fixed to best_x_obj2
-    X_slice_obj2_y = np.column_stack([np.full_like(grid_y, best_x_obj2), grid_y])
-    mu2_slice_y, std2_slice_y = gpr2.predict(X_slice_obj2_y, return_std=True)
-    
-    ax = axes[1, 1]
-    ax.plot(grid_y, mu2_slice_y, "r-", linewidth=2, label="Mean")
-    ax.fill_between(grid_y, mu2_slice_y - 3*std2_slice_y, mu2_slice_y + 3*std2_slice_y, alpha=0.3, color="red", label="±3σ")
-    ax.scatter(X[:, 1], y2, alpha=0.5, s=30, color="gray", label="Samples")
-    ax.set_xlabel("y (with x fixed to predicted optimum for Obj2)", fontsize=10)
-    ax.set_ylabel("Objective 2", fontsize=10)
-    ax.set_title(f"Obj2: y vs Output (x={best_x_obj2:.3f})", fontweight="bold")
+    ax = axes[1]
+    ax.plot(grid_y, mu_slice_y, "b-", linewidth=2, label="Mean")
+    ax.fill_between(grid_y, mu_slice_y - 3 * std_slice_y, mu_slice_y + 3 * std_slice_y, alpha=0.3, color="blue", label="±3σ")
+    ax.scatter(X[:, 1], y, alpha=0.5, s=30, color="gray", label="Samples")
+    ax.set_xlabel(f"y (x fixed to predicted optimum: {best_x:.3f})", fontsize=10)
+    ax.set_ylabel(objective_name, fontsize=10)
+    ax.set_title("Slice along y", fontweight="bold")
     ax.legend(loc="best")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
     plt.savefig(output, dpi=150, bbox_inches="tight")
-    print(f"Saved GPR slice plots to: {output}")
-    return gpr1, gpr2
+    print(f"Saved GPR slice plot for {objective_name} to: {output}")
+
+
+def plot_gpr_slices(study: optuna.study.Study, output_obj1: str = "slices_obj1.png", output_obj2: str = "slices_obj2.png"):
+    """Plot GPR slices per objective by delegating to the single-objective helper."""
+    plot_gpr_slice_single(study, objective_index=0, output=output_obj1, objective_name="Objective 1")
+    plot_gpr_slice_single(study, objective_index=1, output=output_obj2, objective_name="Objective 2")
 
 
 def plot_gpr_2d_surfaces(study: optuna.study.Study, output: str = "gpr_surfaces.png"):
@@ -261,7 +224,7 @@ def plot_gpr_2d_surfaces(study: optuna.study.Study, output: str = "gpr_surfaces.
     y2 = np.array([t.values[1] for t in trials])
 
     # Fit GPRs
-    kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-10, 1e1))
+    kernel = ConstantKernel(1.0, (1e-3, 1e3)) * Matern(length_scale=np.ones(X.shape[1]), nu=2.5) + DotProduct(sigma_0=1.0, sigma_0_bounds=(1e-3, 1e3)) + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-8, 1e-1))
     gpr1 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
     gpr2 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
     gpr1.fit(X, y1)
@@ -428,7 +391,11 @@ def plot_local_sensitivity(study: optuna.study.Study, output: str = "local_sensi
     y1 = np.array([t.values[0] for t in trials])
     y2 = np.array([t.values[1] for t in trials])
 
-    kernel = C(1.0, (1e-3, 1e3)) * RBF(length_scale=1.0, length_scale_bounds=(1e-2, 1e2)) + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-10, 1e1))
+    kernel = (
+        ConstantKernel(1.0, (1e-3, 1e3)) * Matern(length_scale=np.ones(X.shape[1]), nu=2.5)
+        + DotProduct(sigma_0=1.0, sigma_0_bounds=(1e-3, 1e3))
+        + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-8, 1e-1))
+    )
     gpr1 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
     gpr2 = GaussianProcessRegressor(kernel=kernel, normalize_y=True)
     gpr1.fit(X, y1)
@@ -497,7 +464,8 @@ def main():
     parser = argparse.ArgumentParser(description="Optuna multi-objective example")
     parser.add_argument("--trials", type=int, default=20, help="Number of trials")
     parser.add_argument("--output", type=str, default="pareto.png", help="Output image file for Pareto front")
-    parser.add_argument("--slices-output", type=str, default="slices.png", help="Output image file for GPR slice plots with confidence bands")
+    parser.add_argument("--slices-output-obj1", type=str, default="slices_obj1.png", help="Output image file for GPR slice plots (objective 1)")
+    parser.add_argument("--slices-output-obj2", type=str, default="slices_obj2.png", help="Output image file for GPR slice plots (objective 2)")
     parser.add_argument("--surfaces-output", type=str, default="gpr_surfaces.png", help="Output image file for 2D GPR surfaces (mean and variance)")
     parser.add_argument("--partial-correlation", type=str, default="partial_correlation.png", help="Output image file for partial correlation plot")
     parser.add_argument("--local-sensitivity", type=str, default="local_sensitivity.png", help="Output image file for local sensitivity plot")
@@ -511,7 +479,8 @@ def main():
         return os.path.join(results_dir, base)
 
     args.output = to_results_path(args.output)
-    args.slices_output = to_results_path(args.slices_output)
+    args.slices_output_obj1 = to_results_path(args.slices_output_obj1)
+    args.slices_output_obj2 = to_results_path(args.slices_output_obj2)
     args.surfaces_output = to_results_path(args.surfaces_output)
     args.partial_correlation = to_results_path(args.partial_correlation)
     args.local_sensitivity = to_results_path(args.local_sensitivity)
@@ -535,7 +504,11 @@ def main():
     # Compute and plot predictive uncertainty (std) from GPRs for each objective
     # Plot GPR slices with confidence bands
     try:
-        plot_gpr_slices(study, output=args.slices_output)
+        plot_gpr_slices(
+            study,
+            output_obj1=args.slices_output_obj1,
+            output_obj2=args.slices_output_obj2,
+        )
     except Exception as e:
         print("GPR slice plot failed:", e)
     # Plot sensitivity analysis (split into three figures)

@@ -426,8 +426,8 @@ def main():
     parser.add_argument("--local-sensitivity", type=str, default="local_sensitivity_4d.png", help="Output for local sensitivity")
     args = parser.parse_args()
 
-    # Ensure results are saved under the 'results' directory
-    results_dir = os.path.join(os.path.dirname(__file__), "results")
+    # Ensure results are saved under the 'results_4d' directory
+    results_dir = os.path.join(os.path.dirname(__file__), "results_4d")
     os.makedirs(results_dir, exist_ok=True)
     
     def to_results_path(filename: str) -> str:
